@@ -323,16 +323,18 @@ export async function bindForwardPort(server, { address, port, attempts = BIND_A
  * @param {(req: http.IncomingMessage, res: http.ServerResponse) => Promise<boolean>} [options.handleRequest] - 产品附加路由，返回 true 表示已处理。
  * @returns {Promise<{server: http.Server, port: number, close: () => Promise<void>}>}
  */
-export async function startForwardServer({ config, complete, modelRows, log = () => {}, onTrace = () => {}, heartbeatMs = SSE_HEARTBEAT_MS, optimize = null, health = () => ({ ok: true, service: 'our-free-model' }), handleRequest }) {
+export async function startForwardServer({ config, complete, modelRows, log = () => {}, onTrace = () => {}, heartbeatMs = SSE_HEARTBEAT_MS, optimize = null, health = () => ({ ok: true, service: 'our-free-model' }), handleRequest, hgk }) {
+  const controlled = config().hgkControlled === true
+  if (controlled && (!hgk || config().lan?.enabled === true)) throw httpError(400, 'HGK_CONFIGURATION_REJECTED')
   const server = http.createServer((req, res) => {
     const trace = traceRequest(req, res, 'forward', onTrace)
     void handle(req, res, trace).catch(error => {
       trace.setOutcome('failed')
-      log(`request failed: ${error?.message ?? error}`)
+      log(controlled ? 'HGK_REQUEST_FAILED' : `request failed: ${error?.message ?? error}`)
       if (!res.headersSent) {
         const status = Number(error?.statusCode)
         const code = Number.isInteger(status) && status >= 400 && status <= 599 ? status : 500
-        openAiError(res, code, code === 500 ? 'server_error' : 'invalid_request_error', String(error?.message ?? error))
+        openAiError(res, code, code === 500 ? 'server_error' : 'invalid_request_error', controlled ? 'HGK_REQUEST_REJECTED' : String(error?.message ?? error))
       } else {
         res.end()
       }
@@ -340,13 +342,33 @@ export async function startForwardServer({ config, complete, modelRows, log = ()
   })
 
   async function handle(req, res, trace) {
-    if (handleRequest && await handleRequest(req, res)) return
+    if (!controlled && handleRequest && await handleRequest(req, res)) return
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname.replace(/\/+$/, '') || '/'
     let gemini
     try { gemini = geminiRoute(path) }
     catch { geminiError(res, 400, 'invalid Gemini model path'); return }
     const settings = config()
+    if (controlled || settings.hgkControlled === true) {
+      res.setHeader('x-should-retry', 'false')
+      const peer = req.socket.remoteAddress?.replace(/^::ffff:/, '')
+      if (!controlled || settings.hgkControlled !== true || settings.lan?.enabled === true
+        || !peer || !isLoopbackIp(peer) || req.headers[RELAY_HOP_HEADER] !== undefined) {
+        throw httpError(403, 'HGK_LOCAL_ONLY')
+      }
+      if (!settings.enabled) throw httpError(503, 'HGK_DISABLED')
+      if (!authorized(req, settings.key)) throw httpError(401, 'HGK_AUTH_REQUIRED')
+      if (req.method === 'GET' && path === '/v1/hgk/routes') { json(res, 200, hgk.observe()); return }
+      if (req.method === 'GET' && path === '/v1/models') { json(res, 200, { object: 'list', data: hgk.modelRows() }); return }
+      if (req.method === 'POST' && path === '/v1/chat/completions') {
+        const completeControlled = (request, onChunk) => hgk.complete({ ...request,
+          onResolved: metadata => res.setHeader('x-hgk-resolved', Buffer.from(JSON.stringify(metadata)).toString('base64url')),
+        }, onChunk)
+        await serveCompletion(req, res, completeControlled, chatCompletions, heartbeatMs, trace)
+        return
+      }
+      throw httpError(404, 'HGK_ENDPOINT_UNSUPPORTED')
+    }
     if (!settings.enabled) {
       if (gemini) { geminiError(res, 503, 'the forward listener is switched off'); return }
       openAiError(res, 503, 'service_unavailable', 'the forward listener is switched off in Our Free Model settings')
@@ -406,7 +428,9 @@ export async function startForwardServer({ config, complete, modelRows, log = ()
   // spelling: the settings reconciliation compares it, not the resolved IP.
   const bindAddress = await resolveLoopbackBind(config().host)
   const requestedPort = Number.isFinite(Number(config().port)) ? Math.trunc(Number(config().port)) : 0
-  const bound = await bindForwardPort(server, { address: bindAddress, port: requestedPort, log: message => log(`bind: ${message}`) })
+  const bound = controlled
+    ? { port: await listenOnce(server, requestedPort, bindAddress), requested: requestedPort, fellBack: false, bindError: null }
+    : await bindForwardPort(server, { address: bindAddress, port: requestedPort, log: message => log(`bind: ${message}`) })
   server.on('error', error => log(`listener error: ${error?.message ?? error}`))
   if (bound.fellBack) {
     const verdict = classifyBindError(bound.bindError)
@@ -415,6 +439,7 @@ export async function startForwardServer({ config, complete, modelRows, log = ()
 
   return {
     server,
+    hgkControlled: controlled,
     port: bound.port,
     /** The port the settings asked for, which differs from `port` exactly when
      *  the bind had to move. */

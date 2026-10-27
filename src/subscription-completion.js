@@ -256,7 +256,7 @@ async function* streamLines(source, signal, timeoutMs, translate) {
  * At a block boundary an unresolved prefix is masked conservatively so that
  * concatenating different blocks or content types cannot reconstruct a secret.
  */
-function credentialRedactor(secrets, deliver) {
+export function credentialRedactor(secrets, deliver) {
   const root = { children: new Map(), terminal: false }
   for (const secret of new Set(secrets)) {
     let node = root

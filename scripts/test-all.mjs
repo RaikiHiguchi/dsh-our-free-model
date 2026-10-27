@@ -53,6 +53,7 @@ const suites = [
   ['upgrade-ui', 'upgrade-ui-test.mjs', []],
   ['reload', 'reload-test.mjs', []],
   ['forward', 'forward-test.mjs', []],
+  ['hgk', 'hgk-test.mjs', []],
   ['gemini-gateway', 'gemini-gateway-test.mjs', []],
   ['subscriptions', 'subscriptions-test.mjs', []],
   ['subscription-completion', 'subscription-completion-test.mjs', []],

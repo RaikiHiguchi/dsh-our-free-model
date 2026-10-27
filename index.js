@@ -57,6 +57,7 @@ import { addSavings, describeSavingsTotal, emptySavings, saverConfig, savingsPer
 import { CAVEMAN_LEVELS, PONYTAIL_LEVELS } from './src/token-saver.js'
 import { OPTIMIZATIONS } from './src/local-optimize.js'
 import { createModelRuntime, createRuntimeStores } from './src/core/runtime.js'
+import { createHgkPlane } from './src/hgk.js'
 import { createSubscriptions } from './src/subscriptions.js'
 import { createSubscriptionRuntime } from './src/subscription-completion.js'
 import { isSubscriptionEntry } from './src/subscription-adapter.js'
@@ -440,6 +441,7 @@ export function apply(ctx, config) {
   })
   const { state, adapter, refreshCatalog, refreshAvailability, watchEgress, fetchListing, publicModelRows, syncAggregateCatalog } = modelRuntime
   const runForwarded = modelRuntime.complete
+  const hgk = createHgkPlane({ state, availability: () => availability.get() })
 
   // ── registration ────────────────────────────────────────────────────────────
   const routes = () => Object.keys(state().membership)
@@ -525,6 +527,7 @@ export function apply(ctx, config) {
     // POST — and the second one used to close and re-bind the port anyway,
     // resetting whatever request was in flight on the old socket.
     if (forward !== null && wanted
+      && forward.hgkControlled === (desired.hgkControlled === true)
       && forward.host === (desired.host || '127.0.0.1')
       && forward.requestedPort === (Number.isFinite(Number(desired.port)) ? Math.trunc(Number(desired.port)) : 0)) return
     if (forward === null && !wanted) return
@@ -550,8 +553,9 @@ export function apply(ctx, config) {
       forward = await startForwardServer({
         config: () => {
           const current = settings.get().forward ?? {}
-          return { host: current.host || '127.0.0.1', port: current.port ?? 0, enabled: current.enabled === true, key: forwardKey() }
+          return { host: current.host || '127.0.0.1', port: current.port ?? 0, enabled: current.enabled === true, key: forwardKey(), hgkControlled: current.hgkControlled === true, lan: current.lan }
         },
+        hgk,
         complete: (request, onChunk) => runForwarded(request, onChunk),
         modelRows: () => publicModelRows(),
         // Read per request, not captured: the settings page can flip a switch
@@ -625,7 +629,7 @@ export function apply(ctx, config) {
   async function syncRelayOnce() {
     const desired = settings.get().forward ?? {}
     const lan = desired.lan ?? {}
-    const wanted = lan.enabled === true
+    const wanted = lan.enabled === true && desired.hgkControlled !== true
     const host = String(lan.host ?? '').trim() || '0.0.0.0'
     const port = Number.isFinite(Number(lan.port)) && Number(lan.port) > 0 ? Math.trunc(Number(lan.port)) : 0
     if (relay !== null && wanted && forward !== null && relay.host === host && relay.port === port) return
@@ -1959,7 +1963,7 @@ export function createApiRoutes(deps) {
         const current = deps.settings.get()
         const next = sanitizeSettings({ ...current, ...pick(patch, ['enabled', 'exposeRegionModels', 'probeIntervalMinutes', 'defaultMaxTokens', 'announcementAck', 'feedUrl', 'feedPollMinutes', 'notifyOs', 'updateCheckHours', 'autoReloadWatch']), ...visibility }, current)
         if (patch.forward !== undefined) {
-          const forward = { ...(current.forward ?? {}), ...pick(patch.forward, ['enabled', 'host', 'port']) }
+          const forward = { ...(current.forward ?? {}), ...pick(patch.forward, ['enabled', 'host', 'port', 'hgkControlled']) }
           // The listener spends this machine's lane, and a routable bind address
           // would let the whole subnet spend it too. Refused here so the settings
           // page says why, and again in `syncForward` for a hand-edited file.
@@ -1983,6 +1987,9 @@ export function createApiRoutes(deps) {
               lan.port = Number.isFinite(port) && port >= 0 && port <= 65535 ? Math.trunc(port) : (current.forward?.lan?.port ?? 0)
             }
             forward.lan = lan
+          }
+          if (forward.hgkControlled === true && forward.lan?.enabled === true) {
+            return send(400, { error: 'HGK_LAN_REJECTED' })
           }
           next.forward = forward
         }

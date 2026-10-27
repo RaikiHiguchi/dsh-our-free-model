@@ -168,6 +168,8 @@ export const SETTINGS_INITIAL = {
     enabled: false,
     host: '127.0.0.1',
     port: 18899,
+    /** HGK 専用。通常モードの経路・回復・広告には干渉しない。 */
+    hgkControlled: false,
     /** Reach that listener from other machines on the network; off by default,
      *  binds a routable address, and demands a key of its own (`forwardLanKey`). */
     lan: { enabled: false, port: 0 },
